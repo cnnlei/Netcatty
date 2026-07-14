@@ -460,30 +460,42 @@ async function createDefaultOpenCode(options, env, binPath) {
     process.env[key] = String(value);
   }
 
-  const restoreEnv = () => {
-    if (restoreEnv.done) return;
-    restoreEnv.done = true;
+  // Restore the Electron main-process environment as soon as the child has been
+  // spawned. Keeping PATH/OPENCODE_BIN pointed at a temporary shim for the
+  // server lifetime (or list-models idle window) can leak into later turns and
+  // other spawns; see #2184 review. The on-disk shim stays until close() so a
+  // still-running child that re-resolves helpers does not race a deleted path.
+  const restoreProcessEnv = () => {
+    if (restoreProcessEnv.done) return;
+    restoreProcessEnv.done = true;
     for (const key of Object.keys(nextEnv)) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
+  };
+
+  const cleanup = () => {
+    if (cleanup.done) return;
+    cleanup.done = true;
+    restoreProcessEnv();
     cleanupShim();
   };
 
   try {
     const opencode = await sdk.createOpencode(options);
+    restoreProcessEnv();
     const originalClose = opencode.server?.close?.bind(opencode.server);
     if (typeof originalClose === "function") {
       opencode.server.close = () => {
         try { originalClose(); } catch {}
-        restoreEnv();
+        cleanup();
       };
     } else {
-      restoreEnv();
+      cleanup();
     }
     return opencode;
   } catch (error) {
-    restoreEnv();
+    cleanup();
     throw error;
   }
 }
@@ -722,13 +734,33 @@ function whenAborted(signal) {
   });
 }
 
+// Env vars that can change which OpenCode config / provider catalog is visible.
+const OPENCODE_CATALOG_ENV_KEYS = [
+  "HOME",
+  "USERPROFILE",
+  "XDG_CONFIG_HOME",
+  "OPENCODE_BIN",
+  "OPENCODE_CONFIG",
+  "OPENCODE_CONFIG_DIR",
+  "OPENCODE_CONFIG_CONTENT",
+];
+
+function buildOpenCodeCatalogEnvFingerprint(env) {
+  return OPENCODE_CATALOG_ENV_KEYS
+    .map((key) => `${key}=${env?.[key] == null ? "" : String(env[key])}`)
+    .join("\u0000");
+}
+
 function buildOpenCodeListServerKey(binPath, env) {
-  return String(
+  const resolvedBin = String(
     resolveUsableOpenCodeBinPath(binPath, env)
     || binPath
     || env?.OPENCODE_BIN
     || "default",
   );
+  // Same binary + different HOME/XDG/OpenCode config must not share a catalog
+  // server or cache entry (multi-agent / multi-profile setups).
+  return `${resolvedBin}\u0000${buildOpenCodeCatalogEnvFingerprint(env)}`;
 }
 
 // Shared list-models servers: coalesce concurrent catalog loads for the same

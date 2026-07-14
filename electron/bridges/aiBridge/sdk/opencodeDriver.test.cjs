@@ -876,6 +876,42 @@ test("listOpenCodeModels returns empty immediately when already aborted", async 
   resetOpenCodeListServerPool();
 });
 
+test("listOpenCodeModels does not share a pooled server across different catalog env", async () => {
+  resetOpenCodeListServerPool();
+  let createCount = 0;
+  const openCodeFactory = async () => {
+    createCount += 1;
+    const id = createCount;
+    return {
+      client: {
+        config: {
+          providers: async () => ({
+            providers: [],
+            default: { openai: `profile-${id}` },
+          }),
+        },
+      },
+      server: { close() {} },
+    };
+  };
+
+  const first = await listOpenCodeModels({
+    binPath: "/tmp/opencode-env-pool",
+    env: { HOME: "/Users/a", OPENCODE_CONFIG_DIR: "/a/config" },
+    openCodeFactory,
+  });
+  const second = await listOpenCodeModels({
+    binPath: "/tmp/opencode-env-pool",
+    env: { HOME: "/Users/b", OPENCODE_CONFIG_DIR: "/b/config" },
+    openCodeFactory,
+  });
+
+  assert.equal(createCount, 2);
+  assert.deepEqual(first, { currentModelId: "openai/profile-1", models: [] });
+  assert.deepEqual(second, { currentModelId: "openai/profile-2", models: [] });
+  resetOpenCodeListServerPool();
+});
+
 test("classifyOpenCodeSpawnError recognizes missing opencode CLI", () => {
   assert.equal(classifyOpenCodeSpawnError(Object.assign(new Error("spawn opencode ENOENT"), { code: "ENOENT" })).isSpawnEnoent, true);
   assert.equal(classifyOpenCodeSpawnError(new Error("other")).isSpawnEnoent, false);

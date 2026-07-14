@@ -43,6 +43,17 @@ test("SDK model cache keys include resolved CLI path", () => {
   );
 });
 
+test("SDK model cache keys include catalog-affecting agent environment", () => {
+  assert.notEqual(
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/a", OPENCODE_CONFIG_DIR: "/a/config" }),
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/b", OPENCODE_CONFIG_DIR: "/b/config" }),
+  );
+  assert.equal(
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/a" }),
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/a" }),
+  );
+});
+
 test("normalizeSdkListModelsResult preserves current model ids from object results", () => {
   assert.deepEqual(normalizeSdkListModelsResult({
     currentModelId: "openai/gpt-5.1",

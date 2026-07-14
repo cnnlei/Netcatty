@@ -42,8 +42,26 @@ function buildSdkSessionKey(chatSessionId, backendKey, binPath) {
   ].join("\u0000");
 }
 
-function buildSdkModelCacheKey(backendKey, binPath) {
-  return [String(backendKey || ""), String(binPath || "")].join("\u0000");
+// Environment that can change an SDK agent's model catalog without changing the
+// binary path (especially OpenCode HOME / XDG / config overrides).
+const SDK_MODEL_CACHE_ENV_KEYS = [
+  "HOME",
+  "USERPROFILE",
+  "XDG_CONFIG_HOME",
+  "OPENCODE_BIN",
+  "OPENCODE_CONFIG",
+  "OPENCODE_CONFIG_DIR",
+  "OPENCODE_CONFIG_CONTENT",
+  "CLAUDE_CODE_EXECUTABLE",
+  "CODEBUDDY_CODE_PATH",
+  "CURSOR_API_KEY",
+];
+
+function buildSdkModelCacheKey(backendKey, binPath, env) {
+  const envFingerprint = SDK_MODEL_CACHE_ENV_KEYS
+    .map((key) => `${key}=${env?.[key] == null ? "" : String(env[key])}`)
+    .join("\u0000");
+  return [String(backendKey || ""), String(binPath || ""), envFingerprint].join("\u0000");
 }
 
 function shouldCacheSdkRuntimeModels(_backendKey) {
@@ -485,7 +503,7 @@ function registerSdkStreamHandlers(ctx) {
         // claude/copilot/opencode enumerate models via the SDK; codex has no
         // catalog (its driver returns []), so the renderer falls back to curated
         // presets. Cache + in-flight coalescing avoid spawn storms (#2184).
-        const cacheKey = buildSdkModelCacheKey(backendKey, binPath);
+        const cacheKey = buildSdkModelCacheKey(backendKey, binPath, env);
         const shouldCacheModels = shouldCacheSdkRuntimeModels(backendKey);
         const cached = shouldCacheModels ? sdkModelCache.get(cacheKey) : null;
         if (cached && Date.now() - cached.at < MODEL_CACHE_TTL_MS) {
