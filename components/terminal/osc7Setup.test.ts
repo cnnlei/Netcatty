@@ -657,8 +657,8 @@ test("bash snippet still emits OSC 7 when functions are defined", () => {
   });
 });
 
-test("bash snippet unexports PROMPT_COMMAND after install", () => {
-  withTempHome("netcatty-osc7-bash-unexport-", (home) => {
+test("bash snippet preserves an intentional PROMPT_COMMAND export", () => {
+  withTempHome("netcatty-osc7-bash-export-", (home) => {
     runSetup({ HOME: home, SHELL: "/bin/bash" });
     const bashrcPath = join(home, ".bashrc");
     const output = execFileSync(
@@ -674,8 +674,7 @@ test("bash snippet unexports PROMPT_COMMAND after install", () => {
       { env: { ...process.env, HOME: home } },
     ).toString("utf8");
 
-    assert.match(output, /LOCAL/);
-    assert.doesNotMatch(output, /EXPORTED/);
+    assert.match(output, /EXPORTED/);
   });
 });
 
@@ -703,6 +702,32 @@ test("bash snippet dedupes hooks across array PROMPT_COMMAND elements", () => {
     assert.match(output, /echo KEEP/);
     assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
     assert.doesNotMatch(output, /\[1\]="osc7_cwd"/);
+  });
+});
+
+test("bash snippet handles exported array PROMPT_COMMAND", () => {
+  withTempHome("netcatty-osc7-bash-ax-pc-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        [
+          'declare -ax PROMPT_COMMAND=("echo one" "osc7_cwd")',
+          `source ${JSON.stringify(bashrcPath)}`,
+          `source ${JSON.stringify(bashrcPath)}`,
+          'declare -p PROMPT_COMMAND',
+        ].join("; "),
+      ],
+      { env: { ...process.env, HOME: home } },
+    ).toString("utf8");
+
+    assert.match(output, /echo one/);
+    assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
+    assert.doesNotMatch(output, /osc7_cwd"/);
   });
 });
 

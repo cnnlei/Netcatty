@@ -383,7 +383,8 @@ __netcatty_osc7_prompt() {
 }
 # Install/dedupe the guarded prompt hook for both scalar and array PROMPT_COMMAND.
 __netcatty_osc7_hook='declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt'
-if declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
+# Match declare -a / -ax / -ar etc. (array flag may appear with other flags).
+if declare -p PROMPT_COMMAND 2>/dev/null | grep -Eq 'declare -[A-Za-z]*a'; then
   __netcatty_osc7_new=()
   __netcatty_osc7_has_hook=0
   for __netcatty_osc7_el in "${DOLLAR}{PROMPT_COMMAND[@]}"; do
@@ -432,8 +433,9 @@ ${DOLLAR}{__netcatty_osc7_hook}"
   fi
 fi
 unset __netcatty_osc7_hook 2>/dev/null || true
-# Keep PROMPT_COMMAND shell-local so non-login su does not leak the hook.
-declare +x PROMPT_COMMAND 2>/dev/null || true
+# Do not force-unexport PROMPT_COMMAND: the guarded hook is safe if inherited
+# across non-login su (declare -F fails quietly), and users may intentionally
+# export PROMPT_COMMAND for child shells.
 # <<< Netcatty OSC 7 cwd tracking <<<
 NETCATTY_OSC7_BASH
       ;;
