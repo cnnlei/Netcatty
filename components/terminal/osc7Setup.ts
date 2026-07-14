@@ -381,38 +381,57 @@ __netcatty_osc7_prompt() {
     osc7_cwd
   fi
 }
-# Drop legacy v1 bare osc7_cwd lines from the current session's PROMPT_COMMAND.
-if [ -n "${DOLLAR}{PROMPT_COMMAND+x}" ]; then
-  __netcatty_osc7_pc=""
-  __netcatty_osc7_sep=""
-  while IFS= read -r __netcatty_osc7_line || [ -n "${DOLLAR}{__netcatty_osc7_line}" ]; do
-    case "${DOLLAR}{__netcatty_osc7_line}" in
+# Install/dedupe the guarded prompt hook for both scalar and array PROMPT_COMMAND.
+__netcatty_osc7_hook='declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt'
+if declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
+  __netcatty_osc7_new=()
+  __netcatty_osc7_has_hook=0
+  for __netcatty_osc7_el in "${DOLLAR}{PROMPT_COMMAND[@]}"; do
+    case "${DOLLAR}{__netcatty_osc7_el}" in
       osc7_cwd|__netcatty_osc7_prompt) continue ;;
-      *)
-        __netcatty_osc7_pc="${DOLLAR}{__netcatty_osc7_pc}${DOLLAR}{__netcatty_osc7_sep}${DOLLAR}{__netcatty_osc7_line}"
-        __netcatty_osc7_sep="
-"
+      *'declare -F __netcatty_osc7_prompt'*)
+        if [ "${DOLLAR}{__netcatty_osc7_has_hook}" -eq 0 ]; then
+          __netcatty_osc7_new+=("${DOLLAR}{__netcatty_osc7_hook}")
+          __netcatty_osc7_has_hook=1
+        fi
         ;;
+      *) __netcatty_osc7_new+=("${DOLLAR}{__netcatty_osc7_el}") ;;
     esac
-  done <<EOF
+  done
+  if [ "${DOLLAR}{__netcatty_osc7_has_hook}" -eq 0 ]; then
+    __netcatty_osc7_new+=("${DOLLAR}{__netcatty_osc7_hook}")
+  fi
+  PROMPT_COMMAND=("${DOLLAR}{__netcatty_osc7_new[@]}")
+  unset __netcatty_osc7_new __netcatty_osc7_has_hook __netcatty_osc7_el 2>/dev/null || true
+else
+  if [ -n "${DOLLAR}{PROMPT_COMMAND+x}" ]; then
+    __netcatty_osc7_pc=""
+    __netcatty_osc7_sep=""
+    while IFS= read -r __netcatty_osc7_line || [ -n "${DOLLAR}{__netcatty_osc7_line}" ]; do
+      case "${DOLLAR}{__netcatty_osc7_line}" in
+        osc7_cwd|__netcatty_osc7_prompt) continue ;;
+        *'declare -F __netcatty_osc7_prompt'*) continue ;;
+        *)
+          __netcatty_osc7_pc="${DOLLAR}{__netcatty_osc7_pc}${DOLLAR}{__netcatty_osc7_sep}${DOLLAR}{__netcatty_osc7_line}"
+          __netcatty_osc7_sep="
+"
+          ;;
+      esac
+    done <<EOF
 ${DOLLAR}{PROMPT_COMMAND-}
 EOF
-  PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_pc}"
-  unset __netcatty_osc7_pc __netcatty_osc7_sep __netcatty_osc7_line 2>/dev/null || true
-fi
-# Guarded entry: if this string is inherited without function defs, declare -F
-# fails quietly and the hook is skipped (no "command not found").
-case "${DOLLAR}{PROMPT_COMMAND:-}" in
-  *'declare -F __netcatty_osc7_prompt'*) ;;
-  *)
-    if [ -n "${DOLLAR}{PROMPT_COMMAND:-}" ]; then
-      PROMPT_COMMAND="${DOLLAR}{PROMPT_COMMAND}
-declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt"
+    if [ -n "${DOLLAR}{__netcatty_osc7_pc}" ]; then
+      PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_pc}
+${DOLLAR}{__netcatty_osc7_hook}"
     else
-      PROMPT_COMMAND="declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt"
+      PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_hook}"
     fi
-    ;;
-esac
+    unset __netcatty_osc7_pc __netcatty_osc7_sep __netcatty_osc7_line 2>/dev/null || true
+  else
+    PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_hook}"
+  fi
+fi
+unset __netcatty_osc7_hook 2>/dev/null || true
 # Keep PROMPT_COMMAND shell-local so non-login su does not leak the hook.
 declare +x PROMPT_COMMAND 2>/dev/null || true
 # <<< Netcatty OSC 7 cwd tracking <<<
@@ -514,10 +533,18 @@ if awk -v start="$marker" '
         chmod "$__netcatty_osc7_mode" "$__netcatty_osc7_tmp" 2>/dev/null || true
       fi
       if [ -n "${DOLLAR}{__netcatty_osc7_owner:-}" ]; then
-        chown "$__netcatty_osc7_owner" "$__netcatty_osc7_tmp" 2>/dev/null || true
+        # If we cannot restore ownership, leave the original file untouched.
+        if ! chown "$__netcatty_osc7_owner" "$__netcatty_osc7_tmp" 2>/dev/null; then
+          rm -f "$__netcatty_osc7_tmp"
+          need_write=1
+        else
+          mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
+          need_write=0
+        fi
+      else
+        mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
+        need_write=0
       fi
-      mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
-      need_write=0
     else
       rm -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_snip"
       need_write=1

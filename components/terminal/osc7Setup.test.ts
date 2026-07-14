@@ -679,6 +679,33 @@ test("bash snippet unexports PROMPT_COMMAND after install", () => {
   });
 });
 
+test("bash snippet dedupes hooks across array PROMPT_COMMAND elements", () => {
+  withTempHome("netcatty-osc7-bash-array-pc-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        [
+          'PROMPT_COMMAND=("first" "osc7_cwd" "echo KEEP")',
+          `source ${JSON.stringify(bashrcPath)}`,
+          `source ${JSON.stringify(bashrcPath)}`,
+          'declare -p PROMPT_COMMAND',
+        ].join("; "),
+      ],
+      { env: { ...process.env, HOME: home } },
+    ).toString("utf8");
+
+    assert.match(output, /first/);
+    assert.match(output, /echo KEEP/);
+    assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
+    assert.doesNotMatch(output, /\[1\]="osc7_cwd"/);
+  });
+});
+
 test("buildOsc7SetupCommand preserves setup failure status", () => {
   withTempHome("netcatty-osc7-unsupported-shell-", (home) => {
     const result = spawnSync("/bin/sh", ["-c", buildOsc7SetupCommand()], {
