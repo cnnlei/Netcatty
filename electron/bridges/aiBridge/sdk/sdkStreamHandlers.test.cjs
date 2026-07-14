@@ -57,10 +57,13 @@ test("normalizeSdkListModelsResult preserves current model ids from object resul
   });
 });
 
-test("shouldCacheSdkRuntimeModels skips OpenCode model catalogs", () => {
-  assert.equal(shouldCacheSdkRuntimeModels("opencode"), false);
+test("shouldCacheSdkRuntimeModels caches all SDK backends including OpenCode", () => {
+  // OpenCode used to skip the cache, which re-spawned opencode servers on every
+  // model-catalog probe (#2184). TTL still bounds staleness.
+  assert.equal(shouldCacheSdkRuntimeModels("opencode"), true);
   assert.equal(shouldCacheSdkRuntimeModels("claude"), true);
   assert.equal(shouldCacheSdkRuntimeModels("codebuddy"), true);
+  assert.equal(shouldCacheSdkRuntimeModels("copilot"), true);
 });
 
 test("SDK resume only uses the current backend/path session key", () => {

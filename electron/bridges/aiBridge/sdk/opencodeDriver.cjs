@@ -443,6 +443,10 @@ async function withOpenCodeServerPort(options = {}) {
   return { ...options, port: await getAvailablePort(options.hostname || "127.0.0.1") };
 }
 
+function closeOpenCodeInstance(opencode) {
+  try { opencode?.server?.close?.(); } catch {}
+}
+
 async function createDefaultOpenCode(options, env, binPath) {
   let sdk;
   try { sdk = await import("@opencode-ai/sdk"); } catch {
@@ -656,7 +660,7 @@ async function runOpenCodeTurn({
     return { sessionId };
   } finally {
     removeAbortListener?.();
-    try { opencode?.server?.close?.(); } catch {}
+    closeOpenCodeInstance(opencode);
   }
 }
 
@@ -700,12 +704,161 @@ function getOpenCodeDefaultModelId(response) {
   return null;
 }
 
-async function listOpenCodeModels({ env, binPath, openCodeFactory } = {}) {
-  let opencode = null;
-  try {
+function emptyOpenCodeModelCatalog() {
+  return { currentModelId: null, models: [] };
+}
+
+function abortError(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error(String(signal?.reason || "aborted"));
+}
+
+function whenAborted(signal) {
+  if (!signal) return new Promise(() => {});
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(abortError(signal)), { once: true });
+  });
+}
+
+function buildOpenCodeListServerKey(binPath, env) {
+  return String(
+    resolveUsableOpenCodeBinPath(binPath, env)
+    || binPath
+    || env?.OPENCODE_BIN
+    || "default",
+  );
+}
+
+// Shared list-models servers: coalesce concurrent catalog loads for the same
+// binary, then tear down after a short idle so idle Netcatty does not keep
+// opencode processes around (issue #2184).
+const OPENCODE_LIST_SERVER_IDLE_MS = 1500;
+const openCodeListServers = new Map();
+
+function clearOpenCodeListServerIdle(entry) {
+  if (!entry?.idleTimer) return;
+  clearTimeout(entry.idleTimer);
+  entry.idleTimer = null;
+}
+
+function disposeOpenCodeListServer(key, entry) {
+  const current = openCodeListServers.get(key);
+  if (current && current !== entry) return;
+  openCodeListServers.delete(key);
+  clearOpenCodeListServerIdle(entry);
+  try { entry?.createAbort?.abort?.(); } catch {}
+  closeOpenCodeInstance(entry?.opencode);
+  entry.opencode = null;
+}
+
+function releaseOpenCodeListServer(key) {
+  const entry = openCodeListServers.get(key);
+  if (!entry) return;
+  entry.refs = Math.max(0, (entry.refs || 0) - 1);
+  if (entry.refs > 0) return;
+
+  // Create still in flight with no waiters: abort so the SDK kills the child.
+  if (!entry.opencode && entry.createAbort && !entry.createAbort.signal.aborted) {
+    try { entry.createAbort.abort(); } catch {}
+    disposeOpenCodeListServer(key, entry);
+    return;
+  }
+
+  clearOpenCodeListServerIdle(entry);
+  entry.idleTimer = setTimeout(() => {
+    const current = openCodeListServers.get(key);
+    if (!current || current !== entry || current.refs > 0) return;
+    disposeOpenCodeListServer(key, entry);
+  }, OPENCODE_LIST_SERVER_IDLE_MS);
+  if (typeof entry.idleTimer.unref === "function") entry.idleTimer.unref();
+}
+
+async function acquireOpenCodeListServer({ env, binPath, openCodeFactory, signal } = {}) {
+  if (signal?.aborted) throw abortError(signal);
+
+  const key = buildOpenCodeListServerKey(binPath, env);
+  let entry = openCodeListServers.get(key);
+
+  if (entry) {
+    clearOpenCodeListServerIdle(entry);
+  } else {
+    const createAbort = new AbortController();
+    entry = {
+      key,
+      refs: 0,
+      opencode: null,
+      ready: null,
+      idleTimer: null,
+      createAbort,
+    };
     const factory = openCodeFactory || ((options) => createDefaultOpenCode(options, env, binPath));
-    opencode = await factory(await withOpenCodeServerPort({ config: { autoupdate: false }, timeout: 10000 }));
-    const response = await opencode.client.config.providers();
+    entry.ready = (async () => {
+      const options = await withOpenCodeServerPort({
+        config: { autoupdate: false },
+        timeout: 10000,
+        signal: createAbort.signal,
+      });
+      const opencode = await factory(options);
+      // If the last waiter cancelled while create was finishing, kill immediately
+      // so the process cannot leak outside the pool map.
+      if (createAbort.signal.aborted) {
+        closeOpenCodeInstance(opencode);
+        throw abortError(createAbort.signal);
+      }
+      entry.opencode = opencode;
+      return opencode;
+    })().catch((error) => {
+      // Drop a failed create immediately so the next list-models can retry.
+      disposeOpenCodeListServer(key, entry);
+      throw error;
+    });
+    openCodeListServers.set(key, entry);
+  }
+
+  entry.refs += 1;
+  try {
+    const opencode = await Promise.race([
+      entry.ready,
+      whenAborted(signal),
+    ]);
+    if (signal?.aborted) throw abortError(signal);
+    return { key, opencode };
+  } catch (error) {
+    entry.refs = Math.max(0, entry.refs - 1);
+    if (entry.refs <= 0) {
+      // Last waiter left before ready: abort spawn so the SDK child is killed.
+      try { entry.createAbort?.abort?.(); } catch {}
+      disposeOpenCodeListServer(key, entry);
+    }
+    throw error;
+  }
+}
+
+function resetOpenCodeListServerPool() {
+  for (const [key, entry] of openCodeListServers.entries()) {
+    disposeOpenCodeListServer(key, entry);
+  }
+  openCodeListServers.clear();
+}
+
+async function listOpenCodeModels({ env, binPath, openCodeFactory, abortController, signal } = {}) {
+  const effectiveSignal = signal || abortController?.signal;
+  let acquired = null;
+  try {
+    if (effectiveSignal?.aborted) return emptyOpenCodeModelCatalog();
+    acquired = await acquireOpenCodeListServer({
+      env,
+      binPath,
+      openCodeFactory,
+      signal: effectiveSignal,
+    });
+    if (effectiveSignal?.aborted) return emptyOpenCodeModelCatalog();
+    const response = await Promise.race([
+      acquired.opencode.client.config.providers(),
+      whenAborted(effectiveSignal),
+    ]);
     if (response?.error) {
       throw new Error(extractOpenCodeErrorMessage(response.error) || "OpenCode providers unavailable");
     }
@@ -715,9 +868,9 @@ async function listOpenCodeModels({ env, binPath, openCodeFactory } = {}) {
       models: mapOpenCodeModels(data),
     };
   } catch {
-    return { currentModelId: null, models: [] };
+    return emptyOpenCodeModelCatalog();
   } finally {
-    try { opencode?.server?.close?.(); } catch {}
+    if (acquired) releaseOpenCodeListServer(acquired.key);
   }
 }
 
@@ -725,13 +878,16 @@ module.exports = {
   buildOpenCodeConfig,
   buildOpenCodePromptParts,
   classifyOpenCodeSpawnError,
+  closeOpenCodeInstance,
   createOpenCodeProcessEnv,
   withOpenCodeProcessEnv,
   listOpenCodeModels,
   mapOpenCodeModels,
   parseOpenCodeModel,
   resolveUsableOpenCodeBinPath,
+  resetOpenCodeListServerPool,
   runOpenCodeTurn,
   toOpenCodeMcpConfig,
   translateOpenCodeEvent,
+  OPENCODE_LIST_SERVER_IDLE_MS,
 };
