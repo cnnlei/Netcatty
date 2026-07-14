@@ -285,7 +285,7 @@ test("buildOsc7SetupCommand configures bash once and prompt loading stays idempo
     assert.match(bashrc, /PROMPT_COMMAND/);
     assert.match(bashrc, /__netcatty_osc7_prompt/);
     assert.match(bashrc, /netcatty-osc7-version: 2/);
-    assert.match(bashrc, /declare \+x PROMPT_COMMAND/);
+    assert.match(bashrc, /declare -\[A-Za-z\]\*a|declare -p PROMPT_COMMAND/);
 
     const output = execFileSync(
       "/bin/bash",
