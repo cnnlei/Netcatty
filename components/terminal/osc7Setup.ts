@@ -258,55 +258,86 @@ touch "$config"
 # login does not inherit a bare osc7_cwd call into another user's shell.
 snippet_version_marker="netcatty-osc7-version: 2"
 end_marker="# <<< Netcatty OSC 7 cwd tracking <<<"
-need_write=1
-if grep -F "$marker" "$config" >/dev/null 2>&1; then
-  if grep -F "$snippet_version_marker" "$config" >/dev/null 2>&1; then
-    need_write=0
-  elif ! grep -F "$end_marker" "$config" >/dev/null 2>&1; then
-    # Incomplete block (start without end). Do not rewrite/truncate: a half-open
-    # skip would drop every line after the start marker and corrupt the rc file.
-    # Append a complete v2 block instead so tracking still installs.
-    need_write=1
-  else
-    # Replace outdated complete blocks in place (v1 called osc7_cwd directly
-    # from PROMPT_COMMAND / precmd and broke after su when the function was missing).
-    __netcatty_osc7_tmp=$(mktemp) || exit 1
-    # Only commit the rewrite when awk closed every start with a matching end.
-    # Otherwise keep the original file untouched.
-    if awk -v start="$marker" -v end="$end_marker" '
-      index($0, start) {
-        if (skip) { incomplete=1; next }
-        skip=1
-        next
-      }
-      index($0, end) {
-        if (!skip) { incomplete=1; next }
-        skip=0
-        next
-      }
-      !skip { print }
-      END {
-        if (skip) incomplete=1
-        exit incomplete ? 1 : 0
-      }
-    ' "$config" > "$__netcatty_osc7_tmp"
-    then
-      mv "$__netcatty_osc7_tmp" "$config"
-      need_write=1
-    else
-      # Malformed marker layout (e.g. orphan end before open start). Keep the
-      # original file and still append a complete v2 block so setup installs
-      # tracking without truncating user config.
-      rm -f "$__netcatty_osc7_tmp"
-      need_write=1
+# Returns 0 when every start marker is closed by a matching end marker.
+netcatty_osc7_markers_balanced() {
+  awk -v start="$marker" -v end="$end_marker" '
+    index($0, start) {
+      if (skip) { incomplete=1; next }
+      skip=1
+      next
+    }
+    index($0, end) {
+      if (!skip) { incomplete=1; next }
+      skip=0
+      next
+    }
+    END {
+      if (skip) incomplete=1
+      exit incomplete ? 1 : 0
+    }
+  ' "$1"
+}
+
+# Returns 0 when at least one contiguous start..end region contains the v2
+# version marker. Older malformed markers outside that region are ignored so
+# recovery appends stay idempotent.
+netcatty_osc7_has_complete_v2_block() {
+  awk -v start="$marker" -v end="$end_marker" -v ver="$snippet_version_marker" '
+    index($0, start) {
+      skip=1
+      has_ver=0
+      next
+    }
+    skip && index($0, ver) { has_ver=1 }
+    index($0, end) {
+      if (skip && has_ver) found=1
+      skip=0
+      has_ver=0
+      next
+    }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+# Resolve config to a real path so upgrades rewrite the final target of a
+# symlink chain without replacing intermediate links.
+netcatty_osc7_resolve_path() {
+  _path="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    _resolved=$(realpath "$_path" 2>/dev/null || true)
+    if [ -n "$_resolved" ]; then
+      printf '%s\n' "$_resolved"
+      return 0
     fi
   fi
-fi
+  _depth=0
+  while [ -L "$_path" ] && [ "$_depth" -lt 32 ]; do
+    _link=$(readlink "$_path" 2>/dev/null || true)
+    [ -n "$_link" ] || break
+    case "$_link" in
+      /*) _path="$_link" ;;
+      *) _path="$(dirname "$_path")/$_link" ;;
+    esac
+    _depth=$((_depth + 1))
+  done
+  printf '%s\n' "$_path"
+}
 
-if [ "$need_write" = 1 ]; then
+# Best-effort portable mode bits for chmod after atomic replace.
+netcatty_osc7_file_mode() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"
+  elif stat -f '%OLp' "$1" >/dev/null 2>&1; then
+    stat -f '%OLp' "$1"
+  fi
+}
+
+# Append the v2 snippet to the given file path ($1).
+netcatty_osc7_append_v2() {
+  __netcatty_osc7_dest="$1"
   case "$shell_name" in
     bash)
-      cat >> "$config" <<'NETCATTY_OSC7_BASH'
+      cat >> "$__netcatty_osc7_dest" <<'NETCATTY_OSC7_BASH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
 # netcatty-osc7-version: 2
@@ -361,7 +392,7 @@ declare +x PROMPT_COMMAND 2>/dev/null || true
 NETCATTY_OSC7_BASH
       ;;
     zsh)
-      cat >> "$config" <<'NETCATTY_OSC7_ZSH'
+      cat >> "$__netcatty_osc7_dest" <<'NETCATTY_OSC7_ZSH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
 # netcatty-osc7-version: 2
@@ -389,7 +420,7 @@ fi
 NETCATTY_OSC7_ZSH
       ;;
     fish)
-      cat >> "$config" <<'NETCATTY_OSC7_FISH'
+      cat >> "$__netcatty_osc7_dest" <<'NETCATTY_OSC7_FISH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
 # netcatty-osc7-version: 2
@@ -403,6 +434,46 @@ end
 NETCATTY_OSC7_FISH
       ;;
   esac
+}
+
+need_write=1
+if grep -F "$marker" "$config" >/dev/null 2>&1; then
+  if netcatty_osc7_has_complete_v2_block "$config"; then
+    # At least one complete v2 block exists (even if older junk markers remain).
+    need_write=0
+  elif netcatty_osc7_markers_balanced "$config"; then
+    # Complete balanced block without v2 (legacy). Build the final file in a
+    # temp (strip + v2), then atomically replace so read-only modes cannot
+    # leave the config stripped without the new snippet.
+    __netcatty_osc7_target=$(netcatty_osc7_resolve_path "$config")
+    __netcatty_osc7_dir=$(dirname "$__netcatty_osc7_target")
+    __netcatty_osc7_mode=$(netcatty_osc7_file_mode "$__netcatty_osc7_target" || true)
+    __netcatty_osc7_tmp=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7.XXXXXX") || exit 1
+    if awk -v start="$marker" -v end="$end_marker" '
+      index($0, start) { skip=1; next }
+      index($0, end) { skip=0; next }
+      !skip { print }
+    ' "$config" > "$__netcatty_osc7_tmp"
+    then
+      netcatty_osc7_append_v2 "$__netcatty_osc7_tmp"
+      if [ -n "${DOLLAR}{__netcatty_osc7_mode:-}" ]; then
+        chmod "$__netcatty_osc7_mode" "$__netcatty_osc7_tmp" 2>/dev/null || true
+      fi
+      mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
+      need_write=0
+    else
+      rm -f "$__netcatty_osc7_tmp"
+      need_write=1
+    fi
+  else
+    # Incomplete or unbalanced markers and no complete v2 yet.
+    # Never rewrite/truncate: append a complete v2 block only.
+    need_write=1
+  fi
+fi
+
+if [ "$need_write" = 1 ]; then
+  netcatty_osc7_append_v2 "$config"
 fi
 
 if [ -z "$forced_shell" ]; then
