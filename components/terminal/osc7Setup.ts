@@ -350,6 +350,15 @@ netcatty_osc7_file_mode() {
   fi
 }
 
+# Best-effort portable owner:group for chown after atomic replace.
+netcatty_osc7_file_owner() {
+  if stat -c '%u:%g' "$1" >/dev/null 2>&1; then
+    stat -c '%u:%g' "$1"
+  elif stat -f '%u:%g' "$1" >/dev/null 2>&1; then
+    stat -f '%u:%g' "$1"
+  fi
+}
+
 # Append the v2 snippet to the given file path ($1).
 netcatty_osc7_append_v2() {
   __netcatty_osc7_dest="$1"
@@ -473,6 +482,7 @@ if awk -v start="$marker" '
     __netcatty_osc7_target=$(netcatty_osc7_resolve_path "$config")
     __netcatty_osc7_dir=$(dirname "$__netcatty_osc7_target")
     __netcatty_osc7_mode=$(netcatty_osc7_file_mode "$__netcatty_osc7_target" || true)
+    __netcatty_osc7_owner=$(netcatty_osc7_file_owner "$__netcatty_osc7_target" || true)
     __netcatty_osc7_tmp=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7.XXXXXX") || exit 1
     __netcatty_osc7_snip=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7-snip.XXXXXX") || exit 1
     : > "$__netcatty_osc7_snip"
@@ -502,6 +512,9 @@ if awk -v start="$marker" '
       rm -f "$__netcatty_osc7_snip"
       if [ -n "${DOLLAR}{__netcatty_osc7_mode:-}" ]; then
         chmod "$__netcatty_osc7_mode" "$__netcatty_osc7_tmp" 2>/dev/null || true
+      fi
+      if [ -n "${DOLLAR}{__netcatty_osc7_owner:-}" ]; then
+        chown "$__netcatty_osc7_owner" "$__netcatty_osc7_tmp" 2>/dev/null || true
       fi
       mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
       need_write=0
