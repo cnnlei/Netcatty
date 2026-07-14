@@ -262,17 +262,44 @@ need_write=1
 if grep -F "$marker" "$config" >/dev/null 2>&1; then
   if grep -F "$snippet_version_marker" "$config" >/dev/null 2>&1; then
     need_write=0
-  else
-    # Replace outdated blocks in place (v1 called osc7_cwd directly from
-    # PROMPT_COMMAND / precmd and broke after su when the function was missing).
-    __netcatty_osc7_tmp=$(mktemp) || exit 1
-    awk -v start="$marker" -v end="$end_marker" '
-      index($0, start) { skip=1; next }
-      index($0, end) { skip=0; next }
-      !skip { print }
-    ' "$config" > "$__netcatty_osc7_tmp"
-    mv "$__netcatty_osc7_tmp" "$config"
+  elif ! grep -F "$end_marker" "$config" >/dev/null 2>&1; then
+    # Incomplete block (start without end). Do not rewrite/truncate: a half-open
+    # skip would drop every line after the start marker and corrupt the rc file.
+    # Append a complete v2 block instead so tracking still installs.
     need_write=1
+  else
+    # Replace outdated complete blocks in place (v1 called osc7_cwd directly
+    # from PROMPT_COMMAND / precmd and broke after su when the function was missing).
+    __netcatty_osc7_tmp=$(mktemp) || exit 1
+    # Only commit the rewrite when awk closed every start with a matching end.
+    # Otherwise keep the original file untouched.
+    if awk -v start="$marker" -v end="$end_marker" '
+      index($0, start) {
+        if (skip) { incomplete=1; next }
+        skip=1
+        next
+      }
+      index($0, end) {
+        if (!skip) { incomplete=1; next }
+        skip=0
+        next
+      }
+      !skip { print }
+      END {
+        if (skip) incomplete=1
+        exit incomplete ? 1 : 0
+      }
+    ' "$config" > "$__netcatty_osc7_tmp"
+    then
+      mv "$__netcatty_osc7_tmp" "$config"
+      need_write=1
+    else
+      # Malformed marker layout (e.g. orphan end before open start). Keep the
+      # original file and still append a complete v2 block so setup installs
+      # tracking without truncating user config.
+      rm -f "$__netcatty_osc7_tmp"
+      need_write=1
+    fi
   fi
 fi
 

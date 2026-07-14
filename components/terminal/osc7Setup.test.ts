@@ -329,6 +329,64 @@ test("buildOsc7SetupCommand upgrades legacy bash snippet in place", () => {
   });
 });
 
+test("buildOsc7SetupCommand does not truncate bashrc when start marker lacks end", () => {
+  withTempHome("netcatty-osc7-bash-incomplete-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# keep-me-before",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() { :; }",
+        "# important-user-config-after-open-marker",
+        "alias ll='ls -la'",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# keep-me-before/);
+    assert.match(bashrc, /# important-user-config-after-open-marker/);
+    assert.match(bashrc, /alias ll=/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    // Incomplete open block was left in place; a complete v2 block was appended.
+    assert.equal((bashrc.match(/# >>> Netcatty OSC 7 cwd tracking >>>/g) || []).length, 2);
+    assert.equal((bashrc.match(/# <<< Netcatty OSC 7 cwd tracking <<</g) || []).length, 1);
+  });
+});
+
+test("buildOsc7SetupCommand appends when markers are present but unbalanced", () => {
+  withTempHome("netcatty-osc7-bash-unbalanced-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# orphan end first",
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "# user config",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "alias ll='ls -la'",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# orphan end first/);
+    assert.match(bashrc, /# user config/);
+    assert.match(bashrc, /alias ll=/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    // Original unbalanced markers kept; one complete v2 block appended.
+    assert.equal((bashrc.match(/# >>> Netcatty OSC 7 cwd tracking >>>/g) || []).length, 2);
+    assert.equal((bashrc.match(/# <<< Netcatty OSC 7 cwd tracking <<</g) || []).length, 2);
+  });
+});
+
 test("bash snippet does not error when PROMPT_COMMAND is inherited without osc7_cwd", () => {
   withTempHome("netcatty-osc7-bash-su-inherit-", (home) => {
     runSetup({ HOME: home, SHELL: "/bin/bash" });
