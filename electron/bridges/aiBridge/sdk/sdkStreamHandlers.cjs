@@ -522,7 +522,11 @@ function registerSdkStreamHandlers(ctx) {
               abortController,
             );
             const { currentModelId, models } = normalizeSdkListModelsResult(raw);
-            if (shouldCacheModels) {
+            // Do not cache degraded empty catalogs: listOpenCodeModels and
+            // other drivers often return [] on timeout/startup failure, and
+            // pinning that for TTL would block recovery (matches renderer
+            // sdkRuntimeModelCache behavior).
+            if (shouldCacheModels && (models.length > 0 || currentModelId)) {
               sdkModelCache.set(cacheKey, { at: Date.now(), currentModelId, models });
             }
             return { ok: true, currentModelId, models };
