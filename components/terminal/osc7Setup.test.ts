@@ -271,6 +271,9 @@ test("buildOsc7SetupCommand configures bash once and prompt loading stays idempo
     const bashrc = readFileSync(bashrcPath, "utf8");
     assert.equal(markerCount(bashrc), 2);
     assert.match(bashrc, /PROMPT_COMMAND/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /declare \+x PROMPT_COMMAND/);
 
     const output = execFileSync(
       "/bin/bash",
@@ -281,7 +284,116 @@ test("buildOsc7SetupCommand configures bash once and prompt loading stays idempo
       { env: { ...process.env, HOME: home } },
     ).toString("utf8");
 
-    assert.equal(output.split("osc7_cwd").length - 1, 1);
+    assert.match(output, /existing/);
+    // Guarded hook installed once even after double-source.
+    assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
+    // Bare v1 hook must not remain in PROMPT_COMMAND (only the function body may mention osc7_cwd).
+    assert.doesNotMatch(output, /(^|\n)osc7_cwd(\n|$)/);
+  });
+});
+
+test("buildOsc7SetupCommand upgrades legacy bash snippet in place", () => {
+  withTempHome("netcatty-osc7-bash-upgrade-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# user preamble",
+        "",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() {",
+        "  printf 'legacy'\\n",
+        "}",
+        'PROMPT_COMMAND="osc7_cwd"',
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "",
+        "# user epilogue",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.equal(markerCount(bashrc), 2);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /# user preamble/);
+    assert.match(bashrc, /# user epilogue/);
+    assert.doesNotMatch(bashrc, /printf 'legacy'/);
+    assert.equal(bashrc.split("PROMPT_COMMAND=\"osc7_cwd\"").length - 1, 0);
+
+    // Second run is a no-op once version 2 is present.
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    assert.equal(markerCount(readFileSync(bashrcPath, "utf8")), 2);
+  });
+});
+
+test("bash snippet does not error when PROMPT_COMMAND is inherited without osc7_cwd", () => {
+  withTempHome("netcatty-osc7-bash-su-inherit-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+
+    // Simulate non-login su: child gets exported PROMPT_COMMAND but no function defs.
+    const result = spawnSync(
+      "/bin/bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        [
+          `source ${JSON.stringify(bashrcPath)}`,
+          "export PROMPT_COMMAND",
+          // Child env has PROMPT_COMMAND but not the function (fresh bash -c without rc).
+          `env PROMPT_COMMAND="$PROMPT_COMMAND" /bin/bash --noprofile --norc -c 'eval "$PROMPT_COMMAND"; echo OK'`,
+        ].join("; "),
+      ],
+      {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /OK/);
+    assert.doesNotMatch(result.stderr + result.stdout, /command not found/);
+  });
+});
+
+test("bash snippet still emits OSC 7 when functions are defined", () => {
+  withTempHome("netcatty-osc7-bash-emit-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      ["-lc", `source ${JSON.stringify(bashrcPath)}; __netcatty_osc7_prompt; true`],
+      { env: { ...process.env, HOME: home, PWD: home }, cwd: home },
+    ).toString("utf8");
+
+    assert.ok(output.includes("\u001b]7;file://"), "expected OSC 7 output");
+    assert.equal(realpathSync(extractOsc7Path(output)), realpathSync(home));
+  });
+});
+
+test("bash snippet unexports PROMPT_COMMAND after install", () => {
+  withTempHome("netcatty-osc7-bash-unexport-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      [
+        "-lc",
+        [
+          "export PROMPT_COMMAND=preexisting",
+          `source ${JSON.stringify(bashrcPath)}`,
+          'if declare -p PROMPT_COMMAND 2>/dev/null | grep -q "declare -x"; then echo EXPORTED; else echo LOCAL; fi',
+        ].join("; "),
+      ],
+      { env: { ...process.env, HOME: home } },
+    ).toString("utf8");
+
+    assert.match(output, /LOCAL/);
+    assert.doesNotMatch(output, /EXPORTED/);
   });
 });
 
@@ -513,12 +625,21 @@ test("buildOsc7SetupCommand honors zsh ZDOTDIR captured from the current shell",
     const zshrc = readFileSync(zshrcPath, "utf8");
     assert.equal(markerCount(zshrc), 2);
     assert.match(zshrc, /precmd_functions/);
+    assert.match(zshrc, /netcatty-osc7-version: 2/);
+    assert.match(zshrc, /__netcatty_osc7_prompt/);
     assert.equal(existsSync(join(home, ".zshrc")), false);
 
-    execFileSync(zshPath, ["-uc", `source ${JSON.stringify(zshrcPath)}; print -r -- "\${precmd_functions[*]}"`], {
-      env: { ...process.env, HOME: home, ZDOTDIR: zdotdir },
-      stdio: "pipe",
-    });
+    const precmd = execFileSync(
+      zshPath,
+      ["-uc", `source ${JSON.stringify(zshrcPath)}; source ${JSON.stringify(zshrcPath)}; print -r -- "\${precmd_functions[*]}"`],
+      {
+        env: { ...process.env, HOME: home, ZDOTDIR: zdotdir },
+        stdio: "pipe",
+      },
+    ).toString("utf8");
+    assert.match(precmd, /__netcatty_osc7_prompt/);
+    assert.equal(precmd.trim().split(/\s+/).filter((name) => name === "__netcatty_osc7_prompt").length, 1);
+    assert.doesNotMatch(precmd, /(?:^|\s)osc7_cwd(?:\s|$)/);
   });
 });
 

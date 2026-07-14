@@ -254,31 +254,82 @@ __netcatty_osc7_url_path() {
 
 mkdir -p "$(dirname "$config")"
 touch "$config"
+# Snippet v2: guarded prompt entry + unexport PROMPT_COMMAND so su without
+# login does not inherit a bare osc7_cwd call into another user's shell.
+snippet_version_marker="netcatty-osc7-version: 2"
+end_marker="# <<< Netcatty OSC 7 cwd tracking <<<"
+need_write=1
 if grep -F "$marker" "$config" >/dev/null 2>&1; then
-  :
-else
+  if grep -F "$snippet_version_marker" "$config" >/dev/null 2>&1; then
+    need_write=0
+  else
+    # Replace outdated blocks in place (v1 called osc7_cwd directly from
+    # PROMPT_COMMAND / precmd and broke after su when the function was missing).
+    __netcatty_osc7_tmp=$(mktemp) || exit 1
+    awk -v start="$marker" -v end="$end_marker" '
+      index($0, start) { skip=1; next }
+      index($0, end) { skip=0; next }
+      !skip { print }
+    ' "$config" > "$__netcatty_osc7_tmp"
+    mv "$__netcatty_osc7_tmp" "$config"
+    need_write=1
+  fi
+fi
+
+if [ "$need_write" = 1 ]; then
   case "$shell_name" in
     bash)
       cat >> "$config" <<'NETCATTY_OSC7_BASH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
+# netcatty-osc7-version: 2
 __netcatty_osc7_url_path() {
   printf "%s" "$1" | LC_ALL=C awk '${URL_PATH_AWK_SCRIPT}'
 }
 osc7_cwd() {
   printf '\033]7;file://%s%s\a' "${DOLLAR}{HOSTNAME:-localhost}" "$(__netcatty_osc7_url_path "$PWD")"
 }
+# Safe prompt hook: no-op when helpers are missing (PROMPT_COMMAND string may
+# be inherited across su without this rc file).
+__netcatty_osc7_prompt() {
+  if declare -F osc7_cwd >/dev/null 2>&1; then
+    osc7_cwd
+  fi
+}
+# Drop legacy v1 bare osc7_cwd lines from the current session's PROMPT_COMMAND.
+if [ -n "${DOLLAR}{PROMPT_COMMAND+x}" ]; then
+  __netcatty_osc7_pc=""
+  __netcatty_osc7_sep=""
+  while IFS= read -r __netcatty_osc7_line || [ -n "${DOLLAR}{__netcatty_osc7_line}" ]; do
+    case "${DOLLAR}{__netcatty_osc7_line}" in
+      osc7_cwd|__netcatty_osc7_prompt) continue ;;
+      *)
+        __netcatty_osc7_pc="${DOLLAR}{__netcatty_osc7_pc}${DOLLAR}{__netcatty_osc7_sep}${DOLLAR}{__netcatty_osc7_line}"
+        __netcatty_osc7_sep="
+"
+        ;;
+    esac
+  done <<EOF
+${DOLLAR}{PROMPT_COMMAND-}
+EOF
+  PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_pc}"
+  unset __netcatty_osc7_pc __netcatty_osc7_sep __netcatty_osc7_line 2>/dev/null || true
+fi
+# Guarded entry: if this string is inherited without function defs, declare -F
+# fails quietly and the hook is skipped (no "command not found").
 case "${DOLLAR}{PROMPT_COMMAND:-}" in
-  *osc7_cwd*) ;;
+  *'declare -F __netcatty_osc7_prompt'*) ;;
   *)
     if [ -n "${DOLLAR}{PROMPT_COMMAND:-}" ]; then
       PROMPT_COMMAND="${DOLLAR}{PROMPT_COMMAND}
-osc7_cwd"
+declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt"
     else
-      PROMPT_COMMAND="osc7_cwd"
+      PROMPT_COMMAND="declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt"
     fi
     ;;
 esac
+# Keep PROMPT_COMMAND shell-local so non-login su does not leak the hook.
+declare +x PROMPT_COMMAND 2>/dev/null || true
 # <<< Netcatty OSC 7 cwd tracking <<<
 NETCATTY_OSC7_BASH
       ;;
@@ -286,19 +337,26 @@ NETCATTY_OSC7_BASH
       cat >> "$config" <<'NETCATTY_OSC7_ZSH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
+# netcatty-osc7-version: 2
 __netcatty_osc7_url_path() {
   printf "%s" "$1" | LC_ALL=C awk '${URL_PATH_AWK_SCRIPT}'
 }
 osc7_cwd() {
   printf '\033]7;file://%s%s\a' "${DOLLAR}{HOST:-${DOLLAR}{HOSTNAME:-localhost}}" "$(__netcatty_osc7_url_path "$PWD")"
 }
+__netcatty_osc7_prompt() {
+  if typeset -f osc7_cwd >/dev/null 2>&1; then
+    osc7_cwd
+  fi
+}
 if (( ${DOLLAR}{+precmd_functions} )); then
+  precmd_functions=(${DOLLAR}{precmd_functions:#osc7_cwd})
   case " ${DOLLAR}{precmd_functions[*]} " in
-    *" osc7_cwd "*) ;;
-    *) precmd_functions+=(osc7_cwd) ;;
+    *" __netcatty_osc7_prompt "*) ;;
+    *) precmd_functions+=(__netcatty_osc7_prompt) ;;
   esac
 else
-  precmd_functions=(osc7_cwd)
+  precmd_functions=(__netcatty_osc7_prompt)
 fi
 # <<< Netcatty OSC 7 cwd tracking <<<
 NETCATTY_OSC7_ZSH
@@ -307,6 +365,7 @@ NETCATTY_OSC7_ZSH
       cat >> "$config" <<'NETCATTY_OSC7_FISH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
+# netcatty-osc7-version: 2
 function __netcatty_osc7_url_path
     printf "%s" "$argv[1]" | LC_ALL=C awk '${URL_PATH_AWK_SCRIPT}'
 end
