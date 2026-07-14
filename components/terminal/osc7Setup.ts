@@ -259,41 +259,59 @@ touch "$config"
 snippet_version_marker="netcatty-osc7-version: 2"
 end_marker="# <<< Netcatty OSC 7 cwd tracking <<<"
 # Returns 0 when every start marker is closed by a matching end marker.
+# Markers must be whole lines (optional indent) so an echo of the marker text
+# does not count as a block boundary.
 netcatty_osc7_markers_balanced() {
   awk -v start="$marker" -v end="$end_marker" '
-    index($0, start) {
-      if (skip) { incomplete=1; next }
-      skip=1
-      next
+    function trim(s) {
+      sub(/^[ \t]+/, "", s)
+      sub(/[ \t]+$/, "", s)
+      return s
     }
-    index($0, end) {
-      if (!skip) { incomplete=1; next }
-      skip=0
-      next
+    {
+      t = trim($0)
+      if (t == start) {
+        if (skip) incomplete = 1
+        else skip = 1
+        next
+      }
+      if (t == end) {
+        if (!skip) incomplete = 1
+        else skip = 0
+        next
+      }
     }
     END {
-      if (skip) incomplete=1
+      if (skip) incomplete = 1
       exit incomplete ? 1 : 0
     }
   ' "$1"
 }
 
 # Returns 0 when at least one contiguous start..end region contains the v2
-# version marker. Older malformed markers outside that region are ignored so
-# recovery appends stay idempotent.
+# version marker line. Older malformed markers outside that region are ignored
+# so recovery appends stay idempotent.
 netcatty_osc7_has_complete_v2_block() {
-  awk -v start="$marker" -v end="$end_marker" -v ver="$snippet_version_marker" '
-    index($0, start) {
-      skip=1
-      has_ver=0
-      next
+  awk -v start="$marker" -v end="$end_marker" -v ver_line="# $snippet_version_marker" '
+    function trim(s) {
+      sub(/^[ \t]+/, "", s)
+      sub(/[ \t]+$/, "", s)
+      return s
     }
-    skip && index($0, ver) { has_ver=1 }
-    index($0, end) {
-      if (skip && has_ver) found=1
-      skip=0
-      has_ver=0
-      next
+    {
+      t = trim($0)
+      if (t == start) {
+        skip = 1
+        has_ver = 0
+        next
+      }
+      if (skip && t == ver_line) has_ver = 1
+      if (t == end) {
+        if (skip && has_ver) found = 1
+        skip = 0
+        has_ver = 0
+        next
+      }
     }
     END { exit found ? 0 : 1 }
   ' "$1"
@@ -437,7 +455,12 @@ NETCATTY_OSC7_FISH
 }
 
 need_write=1
-if grep -F "$marker" "$config" >/dev/null 2>&1; then
+# Whole-line marker presence only (not substring matches inside echo etc.).
+if awk -v start="$marker" '
+  function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+  trim($0) == start { found = 1; exit }
+  END { exit found ? 0 : 1 }
+' "$config"; then
   if netcatty_osc7_has_complete_v2_block "$config"; then
     # At least one complete v2 block exists (even if older junk markers remain).
     need_write=0
@@ -455,19 +478,25 @@ if grep -F "$marker" "$config" >/dev/null 2>&1; then
     : > "$__netcatty_osc7_snip"
     netcatty_osc7_append_v2 "$__netcatty_osc7_snip"
     if awk -v start="$marker" -v end="$end_marker" -v snip="$__netcatty_osc7_snip" '
-      index($0, start) {
-        # Re-open the snippet each time so multiple complete legacy blocks are
-        # each replaced in place rather than only the first.
-        while ((getline line < snip) > 0) print line
-        close(snip)
-        skip = 1
-        next
+      function trim(s) {
+        sub(/^[ \t]+/, "", s)
+        sub(/[ \t]+$/, "", s)
+        return s
       }
-      index($0, end) {
-        skip = 0
-        next
+      {
+        t = trim($0)
+        if (t == start) {
+          while ((getline line < snip) > 0) print line
+          close(snip)
+          skip = 1
+          next
+        }
+        if (t == end) {
+          skip = 0
+          next
+        }
+        if (!skip) print
       }
-      !skip { print }
     ' "$config" > "$__netcatty_osc7_tmp"
     then
       rm -f "$__netcatty_osc7_snip"

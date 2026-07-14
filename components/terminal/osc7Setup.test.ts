@@ -483,6 +483,29 @@ test("buildOsc7SetupCommand recovers when version line exists with unbalanced ma
   });
 });
 
+test("buildOsc7SetupCommand ignores marker text embedded in echo commands", () => {
+  withTempHome("netcatty-osc7-bash-echo-marker-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        'echo "# >>> Netcatty OSC 7 cwd tracking >>>"',
+        "alias keep_me='yes'",
+        'echo "# <<< Netcatty OSC 7 cwd tracking <<<"',
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /alias keep_me=/);
+    assert.match(bashrc, /echo "# >>> Netcatty OSC 7 cwd tracking >>>"/);
+    assert.match(bashrc, /echo "# <<< Netcatty OSC 7 cwd tracking <<<"/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+  });
+});
+
 test("buildOsc7SetupCommand upgrades a legacy block wrapped in control flow in place", () => {
   withTempHome("netcatty-osc7-bash-if-wrap-", (home) => {
     const bashrcPath = join(home, ".bashrc");
