@@ -504,8 +504,14 @@ if awk -v start="$marker" '
     __netcatty_osc7_dir=$(dirname "$__netcatty_osc7_target")
     __netcatty_osc7_mode=$(netcatty_osc7_file_mode "$__netcatty_osc7_target" || true)
     __netcatty_osc7_owner=$(netcatty_osc7_file_owner "$__netcatty_osc7_target" || true)
-    __netcatty_osc7_tmp=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7.XXXXXX") || exit 1
-    __netcatty_osc7_snip=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7-snip.XXXXXX") || exit 1
+    # Prefer same-dir atomic replace. If the directory is not writable
+    # (managed homes), fall back to append without aborting setup.
+    __netcatty_osc7_tmp=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7.XXXXXX" 2>/dev/null || true)
+    __netcatty_osc7_snip=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7-snip.XXXXXX" 2>/dev/null || true)
+    if [ -z "${DOLLAR}{__netcatty_osc7_tmp:-}" ] || [ -z "${DOLLAR}{__netcatty_osc7_snip:-}" ]; then
+      rm -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_snip" 2>/dev/null || true
+      need_write=1
+    else
     : > "$__netcatty_osc7_snip"
     netcatty_osc7_append_v2 "$__netcatty_osc7_snip"
     if awk -v start="$marker" -v end="$end_marker" -v snip="$__netcatty_osc7_snip" '
@@ -550,6 +556,7 @@ if awk -v start="$marker" '
     else
       rm -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_snip"
       need_write=1
+    fi
     fi
   else
     # Incomplete or unbalanced markers and no complete v2 yet.
