@@ -483,6 +483,40 @@ test("buildOsc7SetupCommand recovers when version line exists with unbalanced ma
   });
 });
 
+test("buildOsc7SetupCommand upgrades a legacy block wrapped in control flow in place", () => {
+  withTempHome("netcatty-osc7-bash-if-wrap-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "if true; then",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() { :; }",
+        'PROMPT_COMMAND="osc7_cwd"',
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "fi",
+        "echo after",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /if true; then/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /^fi$/m);
+    assert.match(bashrc, /echo after/);
+    // v2 stays inside the if/fi, not only after it.
+    const ifIdx = bashrc.indexOf("if true; then");
+    const fiIdx = bashrc.indexOf("\nfi\n");
+    const v2Idx = bashrc.indexOf("netcatty-osc7-version: 2");
+    assert.ok(ifIdx >= 0 && fiIdx > ifIdx && v2Idx > ifIdx && v2Idx < fiIdx);
+    execFileSync("/bin/bash", ["-n", bashrcPath], { stdio: "pipe" });
+  });
+});
+
 test("buildOsc7SetupCommand upgrades a read-only legacy bashrc in one atomic write", () => {
   withTempHome("netcatty-osc7-bash-readonly-", (home) => {
     const bashrcPath = join(home, ".bashrc");

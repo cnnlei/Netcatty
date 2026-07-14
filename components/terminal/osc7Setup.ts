@@ -442,27 +442,42 @@ if grep -F "$marker" "$config" >/dev/null 2>&1; then
     # At least one complete v2 block exists (even if older junk markers remain).
     need_write=0
   elif netcatty_osc7_markers_balanced "$config"; then
-    # Complete balanced block without v2 (legacy). Build the final file in a
-    # temp (strip + v2), then atomically replace so read-only modes cannot
-    # leave the config stripped without the new snippet.
+    # Complete balanced block without v2 (legacy). Replace the marked region
+    # in place (not strip-then-append-at-EOF) so surrounding control flow such
+    # as if/then/fi wrappers stay valid. Build the full file in a temp, then
+    # atomically replace so read-only modes cannot lose the block without the
+    # replacement.
     __netcatty_osc7_target=$(netcatty_osc7_resolve_path "$config")
     __netcatty_osc7_dir=$(dirname "$__netcatty_osc7_target")
     __netcatty_osc7_mode=$(netcatty_osc7_file_mode "$__netcatty_osc7_target" || true)
     __netcatty_osc7_tmp=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7.XXXXXX") || exit 1
-    if awk -v start="$marker" -v end="$end_marker" '
-      index($0, start) { skip=1; next }
-      index($0, end) { skip=0; next }
+    __netcatty_osc7_snip=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7-snip.XXXXXX") || exit 1
+    : > "$__netcatty_osc7_snip"
+    netcatty_osc7_append_v2 "$__netcatty_osc7_snip"
+    if awk -v start="$marker" -v end="$end_marker" -v snip="$__netcatty_osc7_snip" '
+      index($0, start) {
+        # Re-open the snippet each time so multiple complete legacy blocks are
+        # each replaced in place rather than only the first.
+        while ((getline line < snip) > 0) print line
+        close(snip)
+        skip = 1
+        next
+      }
+      index($0, end) {
+        skip = 0
+        next
+      }
       !skip { print }
     ' "$config" > "$__netcatty_osc7_tmp"
     then
-      netcatty_osc7_append_v2 "$__netcatty_osc7_tmp"
+      rm -f "$__netcatty_osc7_snip"
       if [ -n "${DOLLAR}{__netcatty_osc7_mode:-}" ]; then
         chmod "$__netcatty_osc7_mode" "$__netcatty_osc7_tmp" 2>/dev/null || true
       fi
       mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
       need_write=0
     else
-      rm -f "$__netcatty_osc7_tmp"
+      rm -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_snip"
       need_write=1
     fi
   else
