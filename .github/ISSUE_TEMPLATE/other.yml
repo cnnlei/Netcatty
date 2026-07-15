@@ -1,0 +1,34 @@
+name: Question, planning, or other
+description: Ask about Netcatty progress, planning, or another project topic
+title: "[Other] "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when the topic is related to Netcatty but is not a bug report or a focused feature request.
+        Topics that fit better as an open conversation will be continued in GitHub Discussions.
+
+  - type: textarea
+    id: topic
+    attributes:
+      label: Topic / question
+      description: What would you like to know or discuss?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Add enough background for others to understand why this matters.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions for the same topic
+          required: true

@@ -250,10 +250,12 @@ jobs:
     env:
       MOSH_BIN_RELEASE: ${{ needs.resolve-mosh.outputs.mosh_bin_release }}
       ET_BIN_RELEASE: ${{ needs.resolve-et.outputs.et_bin_release }}
-      VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
-      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
-      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
-      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+      # Issue-triage branches are generated from untrusted issue text. Keep
+      # repository secrets out of their push and same-repository PR runs.
+      VITE_SYNC_GITHUB_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GITHUB_CLIENT_ID || '' }}
+      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GOOGLE_CLIENT_ID || '' }}
+      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET || '' }}
+      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID || '' }}
     steps:
       - name: Validate bundled mosh-client release
         if: env.BUNDLE_MOSH == 'true'
@@ -329,11 +331,11 @@ jobs:
         env:
           ELECTRON_BUILDER_PUBLISH: "never"
           # macOS code signing & notarization (only for macOS builds)
-          CSC_LINK: ${{ matrix.name == 'macos' && secrets.MAC_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.name == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ matrix.name == 'macos' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.name == 'macos' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.name == 'macos' && secrets.APPLE_TEAM_ID || '' }}
+          CSC_LINK: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && matrix.name == 'macos' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && matrix.name == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && matrix.name == 'macos' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && matrix.name == 'macos' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && matrix.name == 'macos' && secrets.APPLE_TEAM_ID || '' }}
         run: npm run ${{ matrix.pack_script }}
 
       - name: Upload artifacts
@@ -382,10 +384,10 @@ jobs:
       npm_config_target_arch: x64
       # Keep rebuilt natives portable to stock RHEL 8 libstdc++.
       LDFLAGS: "-static-libstdc++ -static-libgcc"
-      VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
-      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
-      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
-      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+      VITE_SYNC_GITHUB_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GITHUB_CLIENT_ID || '' }}
+      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GOOGLE_CLIENT_ID || '' }}
+      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET || '' }}
+      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID || '' }}
     steps:
       - name: Validate bundled mosh-client release
         if: env.BUNDLE_MOSH == 'true'
@@ -652,10 +654,10 @@ jobs:
       ET_BIN_RELEASE: ${{ needs.resolve-et.outputs.et_bin_release }}
       npm_config_arch: arm64
       npm_config_target_arch: arm64
-      VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
-      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
-      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
-      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+      VITE_SYNC_GITHUB_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GITHUB_CLIENT_ID || '' }}
+      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GOOGLE_CLIENT_ID || '' }}
+      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET || '' }}
+      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ !startsWith(github.ref_name, 'codex/issue-') && !startsWith(github.head_ref, 'codex/issue-') && secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID || '' }}
     steps:
       - name: Validate bundled mosh-client release
         if: env.BUNDLE_MOSH == 'true'

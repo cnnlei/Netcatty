@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["clean", "summary", "findings"],
+  "properties": {
+    "clean": { "type": "boolean" },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "body", "file", "line"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "important"]
+          },
+          "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "body": { "type": "string", "minLength": 1, "maxLength": 1500 },
+          "file": { "type": "string", "maxLength": 500 },
+          "line": { "type": ["integer", "null"], "minimum": 1 }
+        }
+      }
+    }
+  }
+}

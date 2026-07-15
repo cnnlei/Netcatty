@@ -1,0 +1,808 @@
+name: Issue triage and auto-fix
+
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to triage or retry"
+        required: true
+        type: number
+      automatic_reopen:
+        description: "Internal: preserve automatic limits after format correction"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: issue-triage-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: Classify issue
+    runs-on: ubuntu-latest
+    concurrency:
+      group: netcatty-issue-triage-admission
+      # GitHub's current concurrency schema supports queued FIFO admission.
+      # https://docs.github.com/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-queueing-multiple-pending-runs
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+      discussions: write
+      issues: write
+    outputs:
+      category: ${{ steps.apply.outputs.category }}
+      summary: ${{ steps.apply.outputs.summary }}
+      issue_number: ${{ steps.prepare.outputs.issue_number }}
+      issue_url: ${{ steps.prepare.outputs.issue_url }}
+      issue_title: ${{ steps.prepare.outputs.issue_title }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Prepare safe issue context
+        id: prepare
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+          MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.automatic_reopen != true }}
+          DAILY_LIMIT: ${{ vars.CODEX_TRIAGE_DAILY_LIMIT || '10' }}
+        with:
+          script: |
+            const triage = require(`${process.env.GITHUB_WORKSPACE}/scripts/issue-triage.cjs`);
+            await triage.prepareIssueContext({
+              github,
+              context,
+              core,
+              issueNumber: process.env.ISSUE_NUMBER,
+              outputPath: `${process.env.GITHUB_WORKSPACE}/.codex-runtime/issue.json`,
+              dailyLimit: Number(process.env.DAILY_LIMIT),
+              manual: process.env.MANUAL_RUN === 'true',
+            });
+
+      - name: Check OpenAI credential
+        if: steps.prepare.outputs.should_run == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "OPENAI_API_KEY is not configured." >&2
+            exit 1
+          fi
+
+      - name: Classify with Codex
+        id: codex_classify
+        if: steps.prepare.outputs.should_run == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-classify.md
+          output-file: .codex-runtime/classification.json
+          output-schema-file: .github/codex/issue-triage/classification.schema.json
+          sandbox: read-only
+          safety-strategy: drop-sudo
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Apply classification
+        id: apply
+        if: steps.prepare.outputs.should_run == 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ steps.prepare.outputs.issue_number }}
+        with:
+          script: |
+            const triage = require(`${process.env.GITHUB_WORKSPACE}/scripts/issue-triage.cjs`);
+            await triage.applyClassification({
+              github,
+              context,
+              core,
+              issueNumber: process.env.ISSUE_NUMBER,
+              classificationPath: `${process.env.GITHUB_WORKSPACE}/.codex-runtime/classification.json`,
+            });
+
+      - name: Notify Slack about classification
+        if: steps.apply.outcome == 'success'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          STATUS: "Classified as ${{ steps.apply.outputs.category }}"
+          ISSUE_URL: ${{ steps.prepare.outputs.issue_url }}
+          ISSUE_TITLE: ${{ steps.prepare.outputs.issue_title }}
+          DETAIL: ${{ steps.apply.outputs.summary }}
+          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const triage = require('./scripts/issue-triage.cjs');
+          const payload = triage.buildSlackPayload({
+            status: process.env.STATUS,
+            issueUrl: process.env.ISSUE_URL,
+            issueTitle: process.env.ISSUE_TITLE,
+            detail: process.env.DETAIL,
+            workflowUrl: process.env.WORKFLOW_URL,
+          });
+          triage.sendSlackNotification(process.env.SLACK_WEBHOOK_URL, payload)
+            .then(({ skipped }) => skipped && console.log('Slack webhook is not configured; notification skipped.'));
+          NODE
+
+      - name: Notify Slack about classification failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ISSUE_URL: ${{ steps.prepare.outputs.issue_url }}
+          ISSUE_TITLE: ${{ steps.prepare.outputs.issue_title }}
+          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const triage = require('./scripts/issue-triage.cjs');
+          const payload = triage.buildSlackPayload({
+            status: 'Classification failed',
+            issueUrl: process.env.ISSUE_URL,
+            issueTitle: process.env.ISSUE_TITLE,
+            detail: 'The issue could not be classified. Open the workflow run for details.',
+            workflowUrl: process.env.WORKFLOW_URL,
+          });
+          triage.sendSlackNotification(process.env.SLACK_WEBHOOK_URL, payload)
+            .then(({ skipped }) => skipped && console.log('Slack webhook is not configured; notification skipped.'));
+          NODE
+
+  implement:
+    name: Implement and review
+    needs: classify
+    if: >-
+      needs.classify.outputs.category == 'bug_ready' ||
+      needs.classify.outputs.category == 'feature_quick_win'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      ISSUE_NUMBER: ${{ needs.classify.outputs.issue_number }}
+      ISSUE_URL: ${{ needs.classify.outputs.issue_url }}
+      ISSUE_TITLE: ${{ needs.classify.outputs.issue_title }}
+      WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Protect Git metadata
+        shell: bash
+        run: |
+          git_dir="$RUNNER_TEMP/netcatty-triage-git-${GITHUB_RUN_ID}"
+          mv "$GITHUB_WORKSPACE/.git" "$git_dir"
+          chmod -R a+rX,go-w "$git_dir"
+          echo "GIT_DIR=$git_dir" >> "$GITHUB_ENV"
+          echo "GIT_WORK_TREE=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Preserve trusted triage helper
+        shell: bash
+        run: |
+          helper="$RUNNER_TEMP/netcatty-triage-helper-${GITHUB_RUN_ID}.cjs"
+          cp "$GITHUB_WORKSPACE/scripts/issue-triage.cjs" "$helper"
+          chmod 0444 "$helper"
+          echo "TRIAGE_HELPER=$helper" >> "$GITHUB_ENV"
+
+      - name: Prepare issue context
+        id: prepare
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.prepareIssueContext({
+              github,
+              context,
+              core,
+              issueNumber: process.env.ISSUE_NUMBER,
+              outputPath: `${process.env.GITHUB_WORKSPACE}/.codex-runtime/issue.json`,
+              manual: true,
+            });
+
+      - name: Check for an existing automatic pull request
+        id: existing
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+        with:
+          script: |
+            const { data: pulls } = await github.rest.pulls.list({
+              ...context.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const prefix = `codex/issue-${process.env.ISSUE_NUMBER}-`;
+            const marker = '<!-- codex-issue-auto-pr -->';
+            const existing = pulls.find((pull) =>
+              pull.head.ref.startsWith(prefix) &&
+              pull.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+              String(pull.body || '').includes(marker)
+            );
+            core.setOutput('exists', existing ? 'true' : 'false');
+            core.setOutput('url', existing ? existing.html_url : '');
+            core.setOutput('clean', existing ? String(!existing.draft) : 'false');
+
+      - name: Check publishing credentials
+        id: credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TRIAGE_GITHUB_TOKEN: ${{ secrets.TRIAGE_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          ready=true
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "OPENAI_API_KEY is not configured." >&2
+            ready=false
+          fi
+          if [[ -z "$TRIAGE_GITHUB_TOKEN" ]]; then
+            echo "TRIAGE_GITHUB_TOKEN is not configured." >&2
+            ready=false
+          fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to start work
+        id: gate
+        env:
+          HAS_CREDENTIALS: ${{ steps.credentials.outputs.ready }}
+          HAS_EXISTING_PR: ${{ steps.existing.outputs.exists }}
+        shell: bash
+        run: |
+          if [[ "$HAS_CREDENTIALS" == "true" && "$HAS_EXISTING_PR" != "true" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Link existing pull request
+        if: steps.existing.outputs.exists == 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          PULL_REQUEST_URL: ${{ steps.existing.outputs.url }}
+          PULL_REQUEST_CLEAN: ${{ steps.existing.outputs.clean }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.finalizePullRequest({
+              github,
+              context,
+              issueNumber: process.env.ISSUE_NUMBER,
+              pullRequestUrl: process.env.PULL_REQUEST_URL,
+              clean: process.env.PULL_REQUEST_CLEAN === 'true',
+            });
+
+      - name: Report missing credentials
+        if: steps.credentials.outputs.ready != 'true' && steps.existing.outputs.exists != 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.markNeedsHuman({
+              github,
+              context,
+              issueNumber: process.env.ISSUE_NUMBER,
+              message: 'This issue is ready to implement, but the repository automation credentials are not configured yet. A maintainer needs to finish the setup before the fix can be prepared.',
+            });
+
+      - name: Ignore runtime files
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: echo ".codex-runtime/" >> "$GIT_DIR/info/exclude"
+
+      - name: Create working branch
+        id: branch
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          branch="codex/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"
+          git switch -c "$branch"
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install test dependencies
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fish
+          npm ci
+
+      - name: Create restricted Codex user
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          if ! id -u codex >/dev/null 2>&1; then
+            sudo adduser --system --home /home/codex --shell /bin/bash --group codex
+          fi
+          sudo usermod -a -G codex runner
+          sudo chown -R runner:codex "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
+          sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
+          chmod -R go-w "$GIT_DIR"
+          sudo -u codex HOME=/home/codex git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Notify Slack that implementation started
+        if: steps.gate.outputs.run == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const triage = require(process.env.TRIAGE_HELPER);
+          const payload = triage.buildSlackPayload({
+            status: 'Implementation started',
+            issueUrl: process.env.ISSUE_URL,
+            issueTitle: process.env.ISSUE_TITLE,
+            workflowUrl: process.env.WORKFLOW_URL,
+          });
+          triage.sendSlackNotification(process.env.SLACK_WEBHOOK_URL, payload)
+            .then(({ skipped }) => skipped && console.log('Slack webhook is not configured; notification skipped.'));
+          NODE
+
+      - name: Implement with Codex
+        if: steps.gate.outputs.run == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-implement.md
+          sandbox: workspace-write
+          safety-strategy: unprivileged-user
+          codex-user: codex
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Detect source changes
+        id: changes
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain --untracked-files=all -- . ':(exclude).codex-runtime' ':(exclude).codex-runtime/**')" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report when no fix was produced
+        if: steps.gate.outputs.run == 'true' && steps.changes.outputs.present != 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.markNeedsHuman({
+              github,
+              context,
+              issueNumber: process.env.ISSUE_NUMBER,
+              message: 'The automatic implementation pass could not produce a safe, focused fix. A maintainer needs to evaluate the issue.',
+            });
+
+      - name: Verify implementation
+        id: verify1
+        if: steps.changes.outputs.present == 'true'
+        shell: bash
+        run: |
+          before="$RUNNER_TEMP/generated-before-1"
+          mkdir -p "$before"
+          cp infrastructure/ai/harness/generated/cattyToolSpecs.json "$before/"
+          cp infrastructure/ai/harness/generated/globalAgentToolSpecs.json "$before/"
+          set +e
+          sudo -u codex -H env -i \
+            HOME=/home/codex \
+            PATH="$PATH" \
+            CI=true \
+            GIT_DIR="$GIT_DIR" \
+            GIT_WORK_TREE="$GITHUB_WORKSPACE" \
+            bash --noprofile --norc -c '
+            cd "$GIT_WORK_TREE"
+            status=0
+            npm run lint || status=1
+            npm run generate:capability-tools || status=1
+            npm test || status=1
+            npm run build || status=1
+            exit "$status"
+          ' 2>&1 | tee .codex-runtime/verification-full.log
+          status=${PIPESTATUS[0]}
+          cmp "$before/cattyToolSpecs.json" infrastructure/ai/harness/generated/cattyToolSpecs.json || status=1
+          cmp "$before/globalAgentToolSpecs.json" infrastructure/ai/harness/generated/globalAgentToolSpecs.json || status=1
+          set -e
+          result=failed
+          [[ "$status" == "0" ]] && result=passed
+          { echo "result: $result"; tail -n 400 .codex-runtime/verification-full.log; } > .codex-runtime/verification.log
+          echo "passed=$([[ "$status" == "0" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Review pass 1
+        id: review1
+        if: steps.changes.outputs.present == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-review.md
+          output-file: .codex-runtime/review-1.json
+          output-schema-file: .github/codex/issue-triage/review.schema.json
+          sandbox: read-only
+          safety-strategy: unprivileged-user
+          codex-user: codex
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Read review pass 1
+        id: review1_state
+        if: steps.changes.outputs.present == 'true'
+        env:
+          VERIFY_PASSED: ${{ steps.verify1.outputs.passed }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const { parseReviewFile } = require(process.env.TRIAGE_HELPER);
+          const review = parseReviewFile('.codex-runtime/review-1.json');
+          const clean = review.clean && process.env.VERIFY_PASSED === 'true';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `clean=${clean}\n`);
+          NODE
+
+      - name: Prepare findings from review pass 1
+        if: steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        run: cp .codex-runtime/review-1.json .codex-runtime/review-latest.json
+
+      - name: Fix review pass 1
+        if: steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-fix.md
+          sandbox: workspace-write
+          safety-strategy: unprivileged-user
+          codex-user: codex
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Verify after fix pass 1
+        id: verify2
+        if: steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        shell: bash
+        run: |
+          before="$RUNNER_TEMP/generated-before-2"
+          mkdir -p "$before"
+          cp infrastructure/ai/harness/generated/cattyToolSpecs.json "$before/"
+          cp infrastructure/ai/harness/generated/globalAgentToolSpecs.json "$before/"
+          set +e
+          sudo -u codex -H env -i \
+            HOME=/home/codex \
+            PATH="$PATH" \
+            CI=true \
+            GIT_DIR="$GIT_DIR" \
+            GIT_WORK_TREE="$GITHUB_WORKSPACE" \
+            bash --noprofile --norc -c '
+            cd "$GIT_WORK_TREE"
+            status=0
+            npm run lint || status=1
+            npm run generate:capability-tools || status=1
+            npm test || status=1
+            npm run build || status=1
+            exit "$status"
+          ' 2>&1 | tee .codex-runtime/verification-full.log
+          status=${PIPESTATUS[0]}
+          cmp "$before/cattyToolSpecs.json" infrastructure/ai/harness/generated/cattyToolSpecs.json || status=1
+          cmp "$before/globalAgentToolSpecs.json" infrastructure/ai/harness/generated/globalAgentToolSpecs.json || status=1
+          set -e
+          result=failed
+          [[ "$status" == "0" ]] && result=passed
+          { echo "result: $result"; tail -n 400 .codex-runtime/verification-full.log; } > .codex-runtime/verification.log
+          echo "passed=$([[ "$status" == "0" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Review pass 2
+        id: review2
+        if: steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-review.md
+          output-file: .codex-runtime/review-2.json
+          output-schema-file: .github/codex/issue-triage/review.schema.json
+          sandbox: read-only
+          safety-strategy: unprivileged-user
+          codex-user: codex
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Read review pass 2
+        id: review2_state
+        if: steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        env:
+          VERIFY_PASSED: ${{ steps.verify2.outputs.passed }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const { parseReviewFile } = require(process.env.TRIAGE_HELPER);
+          const review = parseReviewFile('.codex-runtime/review-2.json');
+          const clean = review.clean && process.env.VERIFY_PASSED === 'true';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `clean=${clean}\n`);
+          NODE
+
+      - name: Prepare findings from review pass 2
+        if: steps.review2_state.outputs.clean != 'true' && steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        run: cp .codex-runtime/review-2.json .codex-runtime/review-latest.json
+
+      - name: Fix review pass 2
+        if: steps.review2_state.outputs.clean != 'true' && steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-fix.md
+          sandbox: workspace-write
+          safety-strategy: unprivileged-user
+          codex-user: codex
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Verify after fix pass 2
+        id: verify3
+        if: steps.review2_state.outputs.clean != 'true' && steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        shell: bash
+        run: |
+          before="$RUNNER_TEMP/generated-before-3"
+          mkdir -p "$before"
+          cp infrastructure/ai/harness/generated/cattyToolSpecs.json "$before/"
+          cp infrastructure/ai/harness/generated/globalAgentToolSpecs.json "$before/"
+          set +e
+          sudo -u codex -H env -i \
+            HOME=/home/codex \
+            PATH="$PATH" \
+            CI=true \
+            GIT_DIR="$GIT_DIR" \
+            GIT_WORK_TREE="$GITHUB_WORKSPACE" \
+            bash --noprofile --norc -c '
+            cd "$GIT_WORK_TREE"
+            status=0
+            npm run lint || status=1
+            npm run generate:capability-tools || status=1
+            npm test || status=1
+            npm run build || status=1
+            exit "$status"
+          ' 2>&1 | tee .codex-runtime/verification-full.log
+          status=${PIPESTATUS[0]}
+          cmp "$before/cattyToolSpecs.json" infrastructure/ai/harness/generated/cattyToolSpecs.json || status=1
+          cmp "$before/globalAgentToolSpecs.json" infrastructure/ai/harness/generated/globalAgentToolSpecs.json || status=1
+          set -e
+          result=failed
+          [[ "$status" == "0" ]] && result=passed
+          { echo "result: $result"; tail -n 400 .codex-runtime/verification-full.log; } > .codex-runtime/verification.log
+          echo "passed=$([[ "$status" == "0" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Review pass 3
+        id: review3
+        if: steps.review2_state.outputs.clean != 'true' && steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/issue-review.md
+          output-file: .codex-runtime/review-3.json
+          output-schema-file: .github/codex/issue-triage/review.schema.json
+          sandbox: read-only
+          safety-strategy: unprivileged-user
+          codex-user: codex
+          allow-users: "*"
+          allow-bots: true
+          effort: high
+
+      - name: Read review pass 3
+        id: review3_state
+        if: steps.review2_state.outputs.clean != 'true' && steps.review1_state.outputs.clean != 'true' && steps.changes.outputs.present == 'true'
+        env:
+          VERIFY_PASSED: ${{ steps.verify3.outputs.passed }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const { parseReviewFile } = require(process.env.TRIAGE_HELPER);
+          const review = parseReviewFile('.codex-runtime/review-3.json');
+          const clean = review.clean && process.env.VERIFY_PASSED === 'true';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `clean=${clean}\n`);
+          NODE
+
+      - name: Resolve final review state
+        id: final
+        if: steps.changes.outputs.present == 'true'
+        env:
+          REVIEW1: ${{ steps.review1_state.outputs.clean }}
+          REVIEW2: ${{ steps.review2_state.outputs.clean }}
+          REVIEW3: ${{ steps.review3_state.outputs.clean }}
+        shell: bash
+        run: |
+          clean=false
+          if [[ "$REVIEW1" == "true" || "$REVIEW2" == "true" || "$REVIEW3" == "true" ]]; then
+            clean=true
+          fi
+          echo "clean=$clean" >> "$GITHUB_OUTPUT"
+
+      - name: Protect automation configuration
+        id: protected
+        if: steps.changes.outputs.present == 'true'
+        shell: bash
+        run: |
+          clean=true
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all -- .github scripts/issue-triage.cjs AGENTS.md ':(glob)**/AGENTS.md')" ]]; then
+            clean=false
+            echo "The implementation attempted to modify protected automation files." >&2
+          fi
+          echo "clean=$clean" >> "$GITHUB_OUTPUT"
+
+      - name: Report protected-file changes
+        if: steps.changes.outputs.present == 'true' && steps.protected.outputs.clean != 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.markNeedsHuman({
+              github,
+              context,
+              issueNumber: process.env.ISSUE_NUMBER,
+              message: 'The proposed fix touched protected automation files, so it was not published. A maintainer needs to review the issue manually.',
+            });
+
+      - name: Prepare clean publish copy
+        id: trusted
+        if: steps.changes.outputs.present == 'true' && steps.protected.outputs.clean == 'true'
+        shell: bash
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=core.hooksPath
+          export GIT_CONFIG_VALUE_0=/dev/null
+          patch="$RUNNER_TEMP/netcatty-triage-${GITHUB_RUN_ID}.patch"
+          trusted="$RUNNER_TEMP/netcatty-publish-${GITHUB_RUN_ID}"
+          git add -A -- . ':(exclude).codex-runtime' ':(exclude).codex-runtime/**'
+          if git diff --cached --quiet; then
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "empty=false" >> "$GITHUB_OUTPUT"
+          git diff --cached --binary --full-index > "$patch"
+          git worktree add --detach "$trusted" HEAD
+          env -u GIT_DIR -u GIT_WORK_TREE git -C "$trusted" apply --index --binary "$patch"
+          echo "path=$trusted" >> "$GITHUB_OUTPUT"
+
+      - name: Report when review removed all changes
+        if: steps.trusted.outputs.empty == 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.markNeedsHuman({
+              github,
+              context,
+              issueNumber: process.env.ISSUE_NUMBER,
+              message: 'The review cycle removed the proposed changes because no safe, focused fix remained. A maintainer needs to evaluate the issue.',
+            });
+
+      - name: Commit, push, and open pull request
+        id: publish
+        if: steps.trusted.outputs.path != ''
+        env:
+          GH_TOKEN: ${{ secrets.TRIAGE_GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          CLEAN: ${{ steps.final.outputs.clean }}
+          TRUSTED_WORKTREE: ${{ steps.trusted.outputs.path }}
+        shell: bash
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=core.hooksPath
+          export GIT_CONFIG_VALUE_0=/dev/null
+          unset GIT_DIR GIT_WORK_TREE
+          cd "$TRUSTED_WORKTREE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: address issue #${ISSUE_NUMBER}"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$BRANCH_NAME"
+
+          body_file="$RUNNER_TEMP/netcatty-pr-body-${GITHUB_RUN_ID}.md"
+          {
+            echo '<!-- codex-issue-auto-pr -->'
+            echo "Closes #${ISSUE_NUMBER}"
+            echo
+            echo "Prepared automatically from the triaged issue. The change was linted, tested, built, and reviewed before publication."
+            if [[ "$CLEAN" != "true" ]]; then
+              echo
+              echo "The final review still has unresolved findings, so this pull request is a draft and requires maintainer attention."
+            fi
+          } > "$body_file"
+
+          args=(--repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH_NAME" --title "$ISSUE_TITLE" --body-file "$body_file")
+          if [[ "$CLEAN" != "true" ]]; then
+            args+=(--draft)
+          fi
+          url="$(gh pr create "${args[@]}")"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Update issue with pull request
+        if: steps.publish.outputs.url != ''
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          PULL_REQUEST_URL: ${{ steps.publish.outputs.url }}
+          CLEAN: ${{ steps.final.outputs.clean }}
+        with:
+          script: |
+            const triage = require(process.env.TRIAGE_HELPER);
+            await triage.finalizePullRequest({
+              github,
+              context,
+              issueNumber: process.env.ISSUE_NUMBER,
+              pullRequestUrl: process.env.PULL_REQUEST_URL,
+              clean: process.env.CLEAN === 'true',
+            });
+
+      - name: Notify Slack about pull request
+        if: steps.publish.outputs.url != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PULL_REQUEST_URL: ${{ steps.publish.outputs.url }}
+          CLEAN: ${{ steps.final.outputs.clean }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const triage = require(process.env.TRIAGE_HELPER);
+          const clean = process.env.CLEAN === 'true';
+          const payload = triage.buildSlackPayload({
+            status: clean ? 'Pull request ready' : 'Draft pull request needs attention',
+            issueUrl: process.env.ISSUE_URL,
+            issueTitle: process.env.ISSUE_TITLE,
+            detail: process.env.PULL_REQUEST_URL,
+            workflowUrl: process.env.WORKFLOW_URL,
+          });
+          triage.sendSlackNotification(process.env.SLACK_WEBHOOK_URL, payload)
+            .then(({ skipped }) => skipped && console.log('Slack webhook is not configured; notification skipped.'));
+          NODE
+
+      - name: Notify Slack about workflow failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const triage = require(process.env.TRIAGE_HELPER);
+          const payload = triage.buildSlackPayload({
+            status: 'Automation failed',
+            issueUrl: process.env.ISSUE_URL,
+            issueTitle: process.env.ISSUE_TITLE,
+            detail: 'The workflow stopped before it could finish. Open the run for details.',
+            workflowUrl: process.env.WORKFLOW_URL,
+          });
+          triage.sendSlackNotification(process.env.SLACK_WEBHOOK_URL, payload)
+            .then(({ skipped }) => skipped && console.log('Slack webhook is not configured; notification skipped.'));
+          NODE

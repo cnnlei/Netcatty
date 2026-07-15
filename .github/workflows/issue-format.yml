@@ -5,6 +5,7 @@ on:
     types: [opened, edited]
 
 permissions:
+  actions: write
   issues: write
 
 jobs:
@@ -24,17 +25,17 @@ jobs:
             const body = (issue.body || '').trim();
             const errors = [];
 
-            const modernTitle = /^\[(Bug|Feature)\] .{8,}/.test(title);
+            const modernTitle = /^\[(Bug|Feature|Other)\] .{8,}/.test(title);
             const legacyAppTitle = /^Bug:\s*.{5,}/i.test(title);
             if (!modernTitle && !legacyAppTitle) {
               errors.push(
-                'Title must start with `[Bug]` or `[Feature]` followed by a short summary (at least 8 characters after the prefix). Legacy app links using `Bug: ...` are also accepted. Example: `[Bug] SFTP upload fails on Windows`'
+                'Title must start with `[Bug]`, `[Feature]`, or `[Other]` followed by a short summary (at least 8 characters after the prefix). Legacy app links using `Bug: ...` are also accepted. Example: `[Bug] SFTP upload fails on Windows`'
               );
             }
 
             if (body.length < 120) {
               errors.push(
-                'Body is too short. Please use the Bug Report or Feature Request template and fill in all required fields.'
+                'Body is too short. Please use the Bug Report, Feature Request, or Question/planning template and fill in all required fields.'
               );
             }
 
@@ -46,13 +47,14 @@ jobs:
               'Problem / pain point',
               'Proposed solution',
               'Operating system',
+              'Topic / question',
             ];
             const hasTemplateStructure = templateMarkers.some((marker) =>
               body.includes(marker)
             );
             if (!hasTemplateStructure) {
               errors.push(
-                'Body does not look like it came from an issue template. Choose **Bug Report** or **Feature Request** when opening an issue.'
+                'Body does not look like it came from an issue template. Choose **Bug Report**, **Feature Request**, or **Question, planning, or other** when opening an issue.'
               );
             }
 
@@ -81,6 +83,16 @@ jobs:
                   issue_number: issue.number,
                   body: '<!-- issue-format-bot --> Format looks good now. Reopening this issue.',
                 });
+                await github.rest.actions.createWorkflowDispatch({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'issue-triage.yml',
+                  ref: context.payload.repository.default_branch,
+                  inputs: {
+                    issue_number: String(issue.number),
+                    automatic_reopen: 'true',
+                  },
+                });
               }
               core.info('Issue format OK');
               return;
@@ -99,9 +111,9 @@ jobs:
               '### How to resubmit',
               '',
               '1. Go to [New Issue](https://github.com/binaricat/Netcatty/issues/new/choose)',
-              '2. Pick **Bug Report** or **Feature Request**',
+              '2. Pick **Bug Report**, **Feature Request**, or **Question, planning, or other**',
               '3. Fill in every required field',
-              '4. Keep the `[Bug]` or `[Feature]` prefix in the title and add a clear summary after it (older app versions may use `Bug: ...`)',
+              '4. Keep the `[Bug]`, `[Feature]`, or `[Other]` prefix in the title and add a clear summary after it (older app versions may use `Bug: ...`)',
               '',
               'For questions and open-ended discussion, use [GitHub Discussions](https://github.com/binaricat/Netcatty/discussions) instead.',
               '',
